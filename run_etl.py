@@ -1,5 +1,6 @@
 import argparse
-from shared.etl_utils import trigger_etl_job
+from shared.etl_utils import trigger_etl_job, extract_zip
+from config.etl_configs import config
 
 def get_arguments():
     parser = argparse.ArgumentParser(description="ETL job for processing ecommerce orders.")
@@ -17,7 +18,7 @@ def get_arguments():
 
 if __name__ == '__main__':
     args = get_arguments()
-    extract_zip()
+    extract_zip(config.zip_file_name)
     trigger_etl_job(args.table_name, args.load_date, args.reprocess_flag)
 
 

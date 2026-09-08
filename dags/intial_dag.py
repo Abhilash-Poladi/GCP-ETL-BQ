@@ -33,7 +33,15 @@ PYSPARK_JOB = {
     },
     "pyspark_job": {
         "main_python_file_uri":
-            "gs://ap-ecom-etl-code/live-code/start.py",
+            "gs://ap-ecom-etl-code/live-code/run_etl.py",
+        "python_file_uris": [
+            "gs://ap-ecom-etl-code/live-code/GCP_ETL_BQ.zip"
+        ],
+        "args": [
+            "--table_name", "orders_bronze",
+            "--load_date", "{{ ds }}",
+            "--reprocess_flag", "false"
+        ]
     }
 }
 
