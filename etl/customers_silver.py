@@ -3,7 +3,12 @@ from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
 #from shared.etl_configs import config
 from pyspark.sql import functions as F
+from pyspark.sql import Window
 
+
+
+# deduplicate the data (if same change row is present multiple times)
+# handle multiple updates for same customer in source
 
 def app(table_name, load_date, reprocess_flag):
 
@@ -11,7 +16,8 @@ def app(table_name, load_date, reprocess_flag):
 
     # 1. Read the specific partition from the Bronze layer
     bronze_path = f"gs://ap-ecom-bronze/customers/"
-    df_incremental = spark.read.parquet(bronze_path).filter(f"load_dt = '{load_date}'")
+    #df_incremental = spark.read.parquet(bronze_path).filter(f"load_dt = '{load_date}'")
+    df_incremental = spark.read.parquet(bronze_path)
 
     # 2. creating surrogate key for the batch
     df_processed = df_incremental.withColumn(
@@ -34,11 +40,29 @@ def app(table_name, load_date, reprocess_flag):
             256,
         ),
     )
+
+    print(df_processed.count())
+
+    # deduplicate the data one row per change
+    df_processed = df_processed.dropDuplicates(["customer_sk"])
+
+    print(df_processed.count())
+
+    # handle special cases where multiple updates might come in the same batch
+    window_end_dt = Window.partitionBy("customer_id").orderBy(F.col("updated_at"))
+    window_is_active = Window.partitionBy("customer_id").orderBy(F.col("updated_at").desc())
+
+
     df_processed = (
         df_processed.withColumn("eff_start_dt", F.to_timestamp("updated_at"))
-        .withColumn("is_active", F.lit(True))
-        .withColumn("eff_end_dt", F.lit("9999-12-31 23:59:59").cast("timestamp"))
-    )
+        .withColumn("immediate_eff_start_dt", F.lead("eff_start_dt", 1).over(window_end_dt))
+        .withColumn("rn", F.row_number().over(window_is_active))
+        .withColumn("is_active", F.when(F.col("rn") == 1, True).otherwise(False))
+        .withColumn("eff_end_dt", F.coalesce(F.col("immediate_eff_start_dt"), 
+                                             F.lit("9999-12-31 23:59:59").cast("timestamp")))
+        .drop("immediate_eff_start_dt", "rn")
+        )
+    
 
     # 3. Define BigQuery targets
     project_id = 'gp-ct-sbox-con-gcp07f-de'
@@ -65,19 +89,18 @@ def app(table_name, load_date, reprocess_flag):
         merge_query = f"""
                 MERGE INTO `{target_table_id}` T
                 USING (
-                    WITH changed_records AS (
-                        SELECT S.*,
-                        CASE WHEN S.customer_sk = T.customer_sk THEN 'unchanged'
-                             WHEN T.customer_id IS NULL THEN 'new'
-                             WHEN S.customer_sk != T.customer_sk THEN 'changed' END AS change_status
-                        FROM `{staging_table_id}` S
-                        LEFT JOIN `{target_table_id}` T
-                        ON S.customer_id = T.customer_id AND T.is_active = True
+                    WITH new_batch_data AS (
+                        SELECT * FROM `{staging_table_id}` S
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM `{target_table_id}` T 
+                            WHERE T.customer_sk = S.customer_sk
+                        )
                     ),
                     final_records AS (
-                        SELECT * FROM changed_records WHERE change_status IN ('new', 'changed')
+                        SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY updated_at ASC) AS rn
+                        FROM new_batch_data
                     )
-                    SELECT customer_id AS merge_key, * FROM final_records 
+                    SELECT customer_id AS merge_key, * FROM final_records where rn = 1
                     UNION ALL
                     SELECT NULL AS merge_key, * FROM final_records
                 ) S
@@ -99,7 +122,8 @@ def app(table_name, load_date, reprocess_flag):
                         updated_at,
                         eff_start_dt,
                         eff_end_dt,
-                        is_active
+                        is_active,
+                        load_dt
                     )
                     VALUES (
                         S.customer_sk,
@@ -116,7 +140,8 @@ def app(table_name, load_date, reprocess_flag):
                         S.updated_at,
                         S.eff_start_dt,
                         S.eff_end_dt,
-                        S.is_active
+                        S.is_active,
+                        S.load_dt
                     )
 
                 """

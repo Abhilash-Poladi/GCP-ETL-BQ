@@ -38,15 +38,15 @@ PYSPARK_JOB = {
             "gs://ap-ecom-etl-code/live-code/GCP_ETL_BQ.zip"
         ],
         "args": [
-            "--table_name", "customers_silver",
-            "--load_date", "2026-09-01",
+            "--table_name", "customers_bronze",
+            "--load_date", "2026-09-02",
             "--reprocess_flag", "false"
         ]
     }
 }
 
 with DAG(
-    dag_id="bronze_orders_load",
+    dag_id="customers_bronze",
     start_date=datetime(2026, 1, 1),
     schedule=None,
     catchup=False,
