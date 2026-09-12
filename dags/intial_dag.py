@@ -38,8 +38,8 @@ PYSPARK_JOB = {
             "gs://ap-ecom-etl-code/live-code/GCP_ETL_BQ.zip"
         ],
         "args": [
-            "--table_name", "orders_bronze",
-            "--load_date", "{{ ds }}",
+            "--table_name", "customers_silver",
+            "--load_date", "2026-09-01",
             "--reprocess_flag", "false"
         ]
     }
@@ -65,6 +65,7 @@ with DAG(
         project_id=PROJECT_ID,
         region=REGION,
         job=PYSPARK_JOB,
+        retries=0
     )
 
     create_cluster >> run_spark_job

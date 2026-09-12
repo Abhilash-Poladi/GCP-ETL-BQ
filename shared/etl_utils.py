@@ -14,8 +14,11 @@ def trigger_etl_job(table_name, load_date, reprocess_flag):
     try:
         print(f"--- Attempting to import ETL module: {module_name} ---")
         etl_module = importlib.import_module(module_name)
-    except ImportError:
-        print(f"--- Module {module_name} not found in path, attempting path-based load ---")
+    except ImportError as e:
+        # If the ImportError is due to a dependency inside the module failing to load, reraise it
+        if e.name != module_name:
+            raise e
+        raise ImportError(f"ETL module '{module_name}' could not be found in the current path.") from e
 
     if hasattr(etl_module, 'app'):
         etl_module.app(table_name=table_name, load_date=load_date, reprocess_flag=reprocess_flag)
