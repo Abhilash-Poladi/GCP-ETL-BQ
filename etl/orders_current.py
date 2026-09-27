@@ -1,8 +1,11 @@
 from shared.spark_utils import init_spark
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
-from pyspark.sql.functions import col, to_date
+from pyspark.sql import Window
+from pyspark.sql.functions import col, to_date, row_number
 
+# possible enhancments
+# 1. can we completely skip merge when reprocessing same data ?
 
 def app(table_name, load_date, reprocess_flag):
     """
@@ -10,25 +13,30 @@ def app(table_name, load_date, reprocess_flag):
     """
     spark = init_spark(app_name=f"{table_name}_silver_merge")
 
-    # 1. Read the specific partition from the Bronze layer
-    # Assuming the partition structure is gs://bucket/table/load_dt=YYYY-MM-DD
+    # 1. Read bronze data and select cols required, create cols needed, drop row level duplicates
     bronze_path = f"gs://ap-ecom-bronze/orders_bronze/"
-    
     df_incremental = spark.read.parquet(bronze_path) \
         .filter(f"load_dt = '{load_date}'") \
         .select(col("order_id"), col("customer_id"), col("product_id"),
                 col("order_ts"), col("quantity"), col("unit_price"), col("amount"),
                 col("order_status"), col("updated_at"), col("load_dt")) \
-        .withColumn("order_dt", to_date(col("order_ts")))
+        .withColumn("order_dt", to_date(col("order_ts"))) \
+        .dropDuplicates()
 
-    # 2. Define BigQuery targets
+    # 2. Deduplicate order updates since we are only maintaining latest status in this table
+    window_spec = Window.partitionBy("order_id").orderBy(col("updated_at").desc())
+    df_incremental = df_incremental.withColumn("rn", row_number().over(window_spec)) \
+        .filter(col("rn") == 1) \
+        .drop("rn")
+
+    # 3. Define BQ targets, sources, intermediate staging tables
     project_id = 'gp-ct-sbox-con-gcp07f-de'
     dataset_id = "ap_ecom_silver"
     target_table_id = f"{project_id}.{dataset_id}.{table_name}"
     staging_table_name = f"tmp_{table_name}_{load_date.replace('-', '')}"
     staging_table_id = f"{project_id}.{dataset_id}.{staging_table_name}"
 
-    # 2.5. Load silver customers to fetch the point-in-time customer_sk (SCD2 lookup)
+    # 4. Load silver customers to fetch the point-in-time customer_sk (SCD2 lookup)
     df_customers = spark.read.format("bigquery") \
         .option("table", f"{project_id}.ap_ecom_silver.customers_silver") \
         .load() \
@@ -44,18 +52,19 @@ def app(table_name, load_date, reprocess_flag):
 
     client = bigquery.Client()
 
+    # 5. Merge query
     try:
-        # Check if the target table exists
+        # 5.1 Check if the target table exists
         client.get_table(target_table_id)
 
-        # 3. Write incremental data to a temporary staging table in BigQuery
+        # 5.2 Write incremental data to a temporary staging table in BigQuery
         df_incremental.write.format("bigquery") \
             .option("table", staging_table_id) \
             .option("temporaryGcsBucket", "ap-ecom-temp") \
             .mode("overwrite") \
             .save()
 
-        # 4. Execute the MERGE DML statement
+        # 5.3 Execute MERGE statement
         merge_query = f"""
         MERGE `{target_table_id}` T
         USING `{staging_table_id}` S
@@ -78,11 +87,11 @@ def app(table_name, load_date, reprocess_flag):
         """
         client.query(merge_query).result()
 
-        # 5. Clean up the temporary staging table
+        # 5.4 Clean up the temporary staging table
         client.delete_table(staging_table_id, not_found_ok=True)
 
     except NotFound:
-        # If table doesn't exist, perform initial load directly
+        # 5.5 If table doesn't exist, perform initial load directly
         df_incremental.write.format("bigquery") \
             .option("table", target_table_id) \
             .option("partitionField", "order_dt") \
