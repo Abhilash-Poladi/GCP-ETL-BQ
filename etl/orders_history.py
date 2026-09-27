@@ -18,7 +18,7 @@ def app(table_name, load_date, reprocess_flag):
         .select(col("order_id"), col("customer_id"), col("product_id"),
                 col("order_ts"), col("quantity"), col("unit_price"), col("amount"),
                 col("order_status"), col("updated_at"), col("load_dt")).withColumn("order_dt", to_date(col("order_ts"))) \
-                .withColumn("updated_dt", col("updated_at")).dropDuplicates()
+                .withColumn("updated_dt", to_date(col("updated_at"))).dropDuplicates()
     
     # 2. read silver customers and fetch customer_sk 
     df_customers = spark.read.format("bigquery") \
